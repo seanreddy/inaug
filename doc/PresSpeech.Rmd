@@ -1,0 +1,426 @@
+---
+title: "TL;DR : Inaugural Speeches"
+author: "Sean Reddy (sr3336)"
+subtitle: Applied Data Science
+output:
+  html_document: default
+  html_notebook: default
+---
+<center>
+![](../figs/tldr.png)
+</center>
+
+With some inaugural speeches spanning almost two hours and nearly 8500 words of exceptionally verbiose rhetoric, it can be difficult to properly digest the meaning behind a president-elect's induction address. In this notebook, I sought out to ameliorate this problem for every presidential inauguration speech by creating, what's known on the internet as, a TL;DR.
+
+What does TL;DR mean? TL;DR is a commonly used acronym on the internet for "Too Long; Didn't Read" which indicates that a passage of text was so long that the user cannot be bothered to read and sift through it. The acronym is colloquially used as a noun to define a summarized version of the aforementioned passage of text.
+
+As such, I've created a tool that employs:
+
+* Text Mining
+* Text Processing
+* Part of Speech Classification
+* Synonym Identification
+* Synonym Set Cover
+* Term Frequency Weightings
+
+to identify important themes of the speeches allowing us to find the most representative sentences within a given speech. 
+
+While using a similar approach to the widely used strategies in topic modelling, I chose a different methodology in finding meaning in these speeches through using synonymous words with several reasons in mind:
+
+1) Simplicity to the layman over something like LDA.
+
+2) Closely pinpoint specific word usage (still grouping "dog" and "canine" but not "dog" and "bone" like LDA might).
+
+3) Unbounded in the number of topics we expect to see (rather than specifying k topics as in an LDA model) as we do not know what will generally be covered topically from speech to speech -- to complement point (1), this is one less parameter a layman may need to input.
+
+4) Specifically target illustrative sentences rather than overall topics.
+
+With no promises that this model will outperform LDA, LSA, or any other traditional topic modelling approaches, I am hopeful that we will see some interesting results nonetheless. To illustrate this tool, we will be analyzing the presidential address by Donald J. Trump in the notebook below.
+
+Let's take a look.
+
+
+
+*Please note that while this notebook only showcases the most recent inaugural speech, I have included the code in step 11 to generate the TL;DR for all presidents in US history. Additionally, I have included a CSV located in the ../output/ directory which contains the summary generated with the same process for all presidential speeches.*
+
+
+
+# Step 1 - Install and load libraries
+
+```{r, message=FALSE, warning=FALSE}
+packages.used=c("tm", "dplyr", "koRpus", "stringr", "wordnet", "lpSolveAPI")
+
+# check packages that need to be installed.
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+# install additional packages
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE,
+                   repos='http://cran.us.r-project.org')
+}
+
+library(tm)
+library(dplyr)
+library(koRpus)
+library(stringr)
+library(wordnet)
+library(lpSolveAPI)
+```
+
+This notebook was prepared with the following environmental settings.
+
+```{r}
+print(R.version)
+```
+
+
+# Step 2 - Read in data.
+
+The following code reads in the speeches and create a directory to hold our cleaned speeches.
+
+```{r}
+folder.path="../data/InauguralSpeeches/"
+speeches <- list.files(path = folder.path, pattern = "*.txt")
+interim.folder.path <- "../output/InauguralSpeeches_Clean/"
+dir.create(file.path(interim.folder.path))
+
+ff.all<-Corpus(DirSource(folder.path))
+Sys.setenv(WNHOME = paste0(folder.path, "../../lib/wordnet/"))
+setDict(paste0(folder.path, "../../lib/wordnet/dict/"))
+```
+
+# Step 3 - Text pre-processing
+
+We remove extra whitespaces and blank characters. We then save these mildly modified files to our directory we specified earlier.
+
+```{r}
+ff.all<-tm_map(ff.all, stripWhitespace)
+ff.all<-tm_map(ff.all, removeWords, character(0))
+
+for (doc in 1:length(ff.all)) {
+  write.table(paste(as.character(ff.all[[doc]]$content), collapse=' '), paste0(interim.folder.path, "/", paste0(str_sub(speeches[doc],1,-5), "_clean.txt")), sep="\t")
+}
+
+speeches_clean <- list.files(path = interim.folder.path, pattern = "*.txt")
+
+```
+
+
+# Step 4 - Part of speech identification and additional cleaning
+
+In order to properly identify themes, we must classify the parts of speech that each word of the inauguration represents (noun, verb, adjective, etc.). Without this step, we may fall victim to the issue where a word which can assume multiple parts of speech is incorrectly deemed synonymous with a different part of speech (i.e. "object" as a verb and a noun). 
+
+A package called koRpus (https://cran.r-project.org/web/packages/koRpus/vignettes/koRpus_vignette.pdf) contains a tool called treetagger which automatically identifies these parts of speech as well as any punctuation that represents a "full stop" (i.e. the period in the string "Mr. President Obama" is NOT considered the end of a sentence). In order for this package to work properly, we must run this prior to removing stop words and punctuation. Following this 'tagging', we then proceed to remove these superfluous elements. We also ensure that we mark which sentence each word belongs to which will be used later. As mentioned earlier, we will only be analyzing the most recent inaugural speech, and thus we will use only President Trump's speech (thus ignoring the immediately proceeding line of code).
+
+```{r eval=FALSE}
+numSpeeches <- length(ff.all)
+```
+
+```{r}
+presNum <- 9
+numSpeeches <- presNum:presNum
+wordTypes <- list()
+wordTypes_s <- list()
+
+for (pres in numSpeeches) {
+  tagged.text <- treetag(paste0(interim.folder.path, speeches_clean[pres]),treetagger="manual",
+  lang="en", TT.options=list(path="../lib/tree_tagger", preset="en", tknz.opts="-e"))
+  wordTypes[[pres]] <- taggedText(tagged.text)
+  
+  wordTypes[[pres]] <- wordTypes[[pres]][8:nrow(wordTypes[[pres]]),]
+  row.names(wordTypes[[pres]]) <- 1:nrow(wordTypes[[pres]])
+
+  
+  wordTypes[[pres]]$lemma[wordTypes[[pres]]$lemma == "<unknown>"] <- wordTypes[[pres]]$token[wordTypes[[pres]]$lemma == "<unknown>"]
+  wordTypes[[pres]]$lemma[wordTypes[[pres]]$lemma == "@card@"] <- wordTypes[[pres]]$token[wordTypes[[pres]]$lemma == "@card@"]
+  
+  wordTypes[[pres]]$lemma <- tolower(wordTypes[[pres]]$lemma)
+  
+  wordTypes[[pres]]$sentNum <- cumsum(wordTypes[[pres]]$wclass == 'fullstop')+1
+  wordTypes_s[[pres]] <- wordTypes[[pres]]
+  
+  wordTypes[[pres]]<- wordTypes[[pres]][!is.element(wordTypes[[pres]]$wclass, c('punctuation', 'comma', 'fullstop')),]
+  wordTypes[[pres]] <- wordTypes[[pres]][!is.element(wordTypes[[pres]]$lemma, stopwords(kind="en")),]
+}
+
+```
+
+# Step 5 - Finding Synonymous Words
+
+A simple tf-idf word count may be insufficient in capturing the major thematic elements of a speech as words like "manage" and "oversee" will retain different word counts. In order to solve this problem, we are going to have to search and combine any of these synonyms into a collective category. The first step is finding the synonyms of the words present in the speech using a package called wordnet (https://cran.r-project.org/web/packages/wordnet/wordnet.pdf).
+
+```{r}
+
+getSynonyms <- function(pres) {
+
+  df <- wordTypes[[pres]]
+  rownames(df) <- 1:nrow(df)
+  
+  df$syn <- ""
+  
+  for (row in 1:nrow(df)){
+    syn <- NA
+    lemma <- df$lemma[row]
+    pos <- df$wclass[row]
+    
+    if (is.element(pos, c("adjective", "adverb", "noun", "verb", "name"))) {
+      try ({
+        
+        if (pos == 'name') {
+          pos <- 'noun'
+        }
+        
+        syn <- synonyms(lemma, toupper(pos))
+        syn <- tolower(syn)
+        if ((length(syn) > 1) & (is.element(lemma, syn))){
+          syn <- syn[syn != lemma]
+        }
+      })
+    }
+  
+    if (is.na(syn[1])){
+      df$syn[row] <- list(lemma)
+    } else {
+      df$syn[row] <- list(unique(c(lemma,syn)))
+    }
+  }
+  
+  return(df)
+
+}
+
+```
+
+# Step 6 - Create the Terms Matrix
+
+Now that we have found all synonyms of words present in the speech, let's create a binary matrix that shows which synonyms belong to which words present in the speech. This creates a matrix containing our "sets" of words.
+
+```{r}
+
+createTermsMatrix <- function(df) {
+  
+  usedTerms <- t(unique(unlist(df$syn)))
+  dff <- data.frame(matrix(nrow=nrow(df), ncol=length(usedTerms)))
+  colnames(dff) <- usedTerms
+  
+  for (row in 1:nrow(dff)){
+    dff[row,] <- is.element(colnames(dff), df$syn[[row]])*1
+  }
+
+  dff <- as.data.frame(t(dff))
+  colnames(dff) <- df$lemma
+  
+  return(dff)
+  
+}
+
+```
+
+# Step 7 - Synonym Set Cover
+
+With the above matrix calculated, we now seek to find the "common ground" between the collection of words present in the speech. We now want to find whether a word used in the speech has any synonyms that are also synonyms of (or elements of) other words in the speech. Essentially, we must use a concept called set cover in order to find the fewest number of words that can adequately represent every word used in the speech.
+
+For example, with the sentence "The chemical factory released smoke into the atmosphere, resulting in noxious fumes around the city.", the words 'smoke' and 'fumes' are synonymous (or at the very least, have mutual synonyms), and thus can be deemed to be part of the same thematic message. Thus, we can represent both of these words with a single word. The following code will give us an idea of how many unique themes there may be in the speech.
+
+As Set Cover is a famous "NP-Complete" problem, we must use an integer programming approach in order to solve this. The package 'lpSolveAPI' (https://cran.r-project.org/web/packages/lpSolveAPI/lpSolveAPI.pdf) is used in order to carry out this linear programming problem. Please refer to http://theory.stanford.edu/~trevisan/cs261/lecture08.pdf for more information regarding Set Cover.
+
+
+```{r}
+
+solveSetCover <- function(dff) {
+  
+  x <- make.lp(ncol=nrow(dff))
+  model_lp <- x
+  set.type(model_lp, 1:nrow(dff), "integer")
+  
+  for (colnum in 1:ncol(dff)){
+    add.constraint(model_lp, dff[,colnum], ">=", 1)
+  }
+  
+  set.objfn(model_lp, rep(1,nrow(dff)))
+  
+  model_lp
+  
+  solve(model_lp)
+  get.objective(model_lp)
+  aaa <- get.variables(model_lp)
+
+  return(aaa)
+}
+
+```
+
+# Step 8 - Finding Term Frequency
+
+With the minimal matrix produced above, we can now find the term frequency of how often each 'theme' was used. This is calculated by summing across the rows of the matrix we produced in the previous step, giving us the number of occurrences of that theme. We can then multiply these row sums by the binary matrix itself which will yield a matrix with values for the term frequency in the respective columns of each word in the speech. In the aforementioned example, "smoke" and "fumes" columns will each have a 2 in the corresponding element of the mutual synonym chosen. Taking the maximum of each column will yield the maximum number of occurrences that word has throughout the speech. We will use this as our term frequency. Applying this term frequency and summing over each sentence will give a word-occurrence score for each sentence. If we now sort by highest score, we can find the sentences which represent the most present themes within the entire speech. 
+
+
+*Note 1: Please note that each theme is not necessarily a word present in the speech at all, as it may merely be a synonym of two or more words present in the speech that encapsulates the definition of both or all of them*
+
+*Note 2: As we are only looking at 1 document, the lack of a corpus restrains us from using a proper tf-idf method. If we had say, a corpus of speeches from Donald Trump, then we could take this term frequency and apply it in the traditional tf-idf manner. Using the other speeches as the corpus is an approach that you may take, however this may skew your results in unexpected ways. This is a clear shortcoming of this method, and I plan to look into it going forward.*
+
+
+```{r}
+
+create_tldr <- function(dff, aaa, pres, numSentences) {
+  
+  dff2 <- subset(dff, as.logical(aaa))
+  rownames(dff2) <- subset(rownames(dff), as.logical(aaa))
+  rowsums <- as.numeric(rowSums(dff2))
+  
+  weightings <- rowsums * dff2
+  
+  max_weights <- as.data.frame(apply(weightings, 2, max))
+  
+  df_o <- wordTypes_s[[pres]]
+  
+  unique(df_o$wclass)
+  
+  df_e <- df_o[!(is.element(df_o$wclass, c('comma', 'fullstop', 'punctuation'))),] 
+  df_e <- df_e[!(is.element(df_e$lemma, stopwords(kind="en"))),]
+  df_s <- cbind(max_weights, df_e$sentNum)
+  colnames(df_s) <- c("weight", "sentence")
+  
+  sent_score <- as.numeric(as.data.frame(aggregate(df_s$weight, by=list(df_s$sentence), FUN=sum))[,2])
+  topSentences <- sort(sent_score, index.return=TRUE, decreasing=TRUE)$ix
+  tldr_v <- df_o$token[is.element(df_o$sentNum, topSentences[1:numSentences])]
+  tldr <- paste(as.character(tldr_v), collapse=' ')
+  return(tldr)
+
+}
+
+```
+
+# Step 9 - Formatting
+
+Converting from our matrix back to raw text, we put the text through some slight formatting in order to be in it's natural format.
+
+```{r}
+
+# Properly format TLDR
+propFormat <- function(str) {
+  if ((substr(str, 1, 2) == ". ") | (substr(str, 1, 2) == ": ") | (substr(str, 1, 2) == "; ")) {
+    str <- substring(str, 3)
+    str <- paste0(append(str, "."), collapse='')
+  }
+  str <- gsub(" ,", ",", str)
+  str_form <- gsub(" \\.", ".", str)
+  return(str_form)
+}
+
+```
+
+# Step 10 - Combine Prior Steps & View Results
+
+All of the other steps defined functions which are now executed below to cleanly give us a 5* sentence summary of what Donald Trump attempted to get across in his inauguration speech based upon the process defined throughout this notebook. Enjoy.
+
+\\* hyperparameter
+
+```{r}
+
+numSentences <- 5
+tldr_m <- vector()
+
+generateSummary <- function(pres, numSentences){
+  df_m <- getSynonyms(pres)
+  tm_m <- createTermsMatrix(df_m)
+  aaa_m <- solveSetCover(tm_m)
+  tldr_m <- create_tldr(tm_m, aaa_m, pres, numSentences)
+  tldr_m <- propFormat(tldr_m)
+  return(tldr_m)
+}
+
+tldr <- generateSummary(presNum, numSentences)
+
+presidents <- as.data.frame(read.csv('../data/InaugurationInfo.csv', as.is=TRUE))
+presidents <- presidents[order(presidents$File),]
+
+reduced <- sapply(gregexpr("\\S+", tldr), length)
+orig <- as.numeric(presidents$Words[9])
+
+tldr
+print(paste("Total Word Reduction:", round((orig-reduced)/orig*100,2), "%"))
+```
+
+
+# Bonus
+
+I have included a few additional TL;DR's below for your viewing pleasure.
+
+
+```{r}
+otherSpeeches <- read.csv('../output/tldr_1thru58.csv', as.is=TRUE)[,2]
+otherSpeeches <- as.data.frame(cbind(presidents$File, otherSpeeches, presidents$Words))
+colnames(otherSpeeches) <- c("President", "Speech", "Words")
+
+otherSpeech_print <- function(speechNum){
+  add_speech <- levels(droplevels(otherSpeeches$Speech[speechNum]))
+  reduced <- sapply(gregexpr("\\S+", add_speech), length)
+  orig <- as.numeric(levels(droplevels(otherSpeeches$Words[speechNum])))
+  print(add_speech)
+  print(paste("Total Word Reduction:", round((orig-reduced)/orig*100,2), "%"))
+}
+
+```
+
+
+### Abraham Lincoln's 2nd Term
+
+```{r}
+otherSpeech_print(2)
+```
+
+### Barack Obama's 2nd Term
+
+```{r}
+otherSpeech_print(6)
+```
+
+### FDR's 2nd Term
+
+```{r}
+otherSpeech_print(13)
+```
+
+
+
+
+# Step 11: Generate summaries for all presidents.
+
+### *Warning: This code chunk will intentionally not run in this notebook. This takes a long time to generate. As noted above, I have included the output generated in a csv file located in the output directory entitled "tldr_1thru58.csv".*
+
+```{r eval=FALSE}
+# To generate all summaries and save to CSV. 
+
+numSpeeches <- length(ff.all)
+
+for (pres in 1:numSpeeches) {
+  tldr_all[pres] <- generateSummary(pres, numSentences)
+}
+
+tldr_all <- as.data.frame(tldr_all)
+rownames(tldr_all) <- 1:numSpeeches
+write.csv(as.data.frame(tldr_all), file=paste0("../output/", "tldr_1thru58.csv"))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
